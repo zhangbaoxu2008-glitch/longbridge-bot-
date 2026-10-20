@@ -23,14 +23,35 @@ MODEL_NAME = "deepseek/deepseek-chat"
 RUN_MINUTES = int(os.environ.get("RUN_MINUTES", "18"))
 
 
-def get_account_status() -> str:
-    """获取模拟盘全部资金、购买力、当前持仓盈亏及今日订单（含订单号供撤单使用）"""
-    info = []
+def get_real_usd_cash() -> tuple[float, float]:
+    """获取真实折算后的可用美元现金 (usd_cash) 与美元净资产 (usd_net_assets)"""
+    usd_cash = 0.0
+    usd_net = 0.0
     for b in trade_ctx.account_balance():
-        info.append(
-            f"【账户资产】币种: {b.currency}, 可用现金: {b.total_cash}, "
-            f"最大购买力: { getattr(b, 'buy_power', b.total_cash) }, 净资产总额: {b.net_assets}"
-        )
+        rate = 7.82 if str(b.currency).upper() == "HKD" else 1.0
+        usd_cash = float(b.total_cash) / rate
+        usd_net = float(b.net_assets) / rate
+        # 如果有细分币种现金列表，优先检查美元子账户与港币折算
+        cash_infos = getattr(b, "cash_infos", [])
+        if cash_infos:
+            avail_usd_total = 0.0
+            for ci in cash_infos:
+                c_rate = 7.82 if str(ci.currency).upper() == "HKD" else 1.0
+                avail_usd_total += max(0.0, float(ci.available_cash)) / c_rate
+            if avail_usd_total > 0:
+                usd_cash = avail_usd_total
+    return round(usd_cash, 2), round(usd_net, 2)
+
+
+def get_account_status() -> str:
+    """获取已自动换算为美元(USD)的真实可用资金、当前持仓与今日订单"""
+    usd_cash, usd_net = get_real_usd_cash()
+    info = [
+        f"【账户真实美元资产（已将港币按7.82折算为USD）】\n"
+        f"当前真实可用美元现金: {usd_cash:.2f} USD (下单总金额绝对不能超过此数字！)\n"
+        f"当前单笔买单建议上限(35%仓位): {usd_cash * 0.35:.2f} USD\n"
+        f"账户折合美元总净资产: {usd_net:.2f} USD"
+    ]
 
     pos_resp = trade_ctx.stock_positions()
     positions = []
@@ -38,23 +59,22 @@ def get_account_status() -> str:
         for p in ch.positions:
             if int(p.quantity) > 0:
                 positions.append(
-                    f"代码: {p.symbol}, 持仓股数: {p.quantity}, 可卖股数: {p.available_quantity}, 成本均价: {p.cost_price}"
+                    f"代码: {p.symbol}, 持仓股数: {p.quantity}, 可卖股数: {p.available_quantity}, 成本均价: {p.cost_price} USD"
                 )
     info.append("【当前持仓】\n" + ("\n".join(positions) if positions else "当前空仓"))
 
     orders = trade_ctx.today_orders()
     order_list = []
-    for o in orders[:15]:
+    for o in orders[:12]:
         order_list.append(
             f"订单号: {o.order_id}, 代码: {o.symbol}, 方向: {o.side}, "
-            f"委托股数: {o.quantity}, 委托价: {o.price}, 状态: {o.status}"
+            f"股数: {o.quantity}, 委托价: {o.price}, 状态: {o.status}"
         )
     info.append("【今日订单记录】\n" + ("\n".join(order_list) if order_list else "今日暂无订单"))
     return "\n\n".join(info)
 
 
 def get_us_stock_quote(symbols: list[str]) -> str:
-    """批量获取美股实时报价、日内涨跌幅、振幅与成交量"""
     quotes = quote_ctx.quote(symbols)
     lines = []
     for q in quotes:
@@ -65,13 +85,12 @@ def get_us_stock_quote(symbols: list[str]) -> str:
         intra_chg = ((last_p - open_p) / open_p) * 100
         lines.append(
             f"代码: {q.symbol}, 最新价: {last_p:.2f} USD, 昨收涨跌: {day_chg:+.2f}%, "
-            f"今开涨跌: {intra_chg:+.2f}%, 今日最高: {q.high}, 今日最低: {q.low}, 成交量: {q.volume}"
+            f"今开涨跌: {intra_chg:+.2f}%, 最高: {q.high}, 最低: {q.low}, 成交量: {q.volume}"
         )
     return "\n".join(lines)
 
 
 def get_kline_trend(symbol: str) -> str:
-    """获取单只股票最近 15 分钟 K 线序列与短期均线趋势，辅助判断买点与卖点"""
     try:
         klines = quote_ctx.candlesticks(symbol, Period.Min_15, 12, AdjustType.NoAdjust)
     except Exception:
@@ -82,37 +101,73 @@ def get_kline_trend(symbol: str) -> str:
     ma5 = sum(closes[-5:]) / min(len(closes), 5)
     ma10 = sum(closes[-10:]) / min(len(closes), 10)
     recent_bars = [
-        f"收盘:{float(k.close):.2f}(最高:{float(k.high):.2f}/最低:{float(k.low):.2f}/量:{k.volume})"
+        f"收盘:{float(k.close):.2f}(高:{float(k.high):.2f}/低:{float(k.low):.2f})"
         for k in klines[-5:]
     ]
     return (
-        f"【{symbol} 15分钟K线趋势】最新价: {closes[-1]:.2f}, MA5均线: {ma5:.2f}, MA10均线: {ma10:.2f}\n"
+        f"【{symbol} 15分钟K线趋势】最新价: {closes[-1]:.2f} USD, MA5: {ma5:.2f}, MA10: {ma10:.2f}\n"
         f"最近5根K线: " + " -> ".join(recent_bars)
     )
 
 
 def place_paper_limit_order(symbol: str, side: str, quantity: int, price: float, reason: str) -> str:
-    """提交美股模拟盘限价单，已解除股数上限，由 AI 根据资金自主决定仓位大小"""
+    """提交限价单，内置美元余额防超买自动校准器与订单状态实时复核"""
     if quantity <= 0:
         return "拦截：下单股数必须大于 0。"
     try:
         order_side = OrderSide.Buy if side.lower() == "buy" else OrderSide.Sell
+        final_qty = int(quantity)
+
+        # 如果是买入，自动检查真实可用美元，防止股数过大被长桥拒绝
+        if order_side == OrderSide.Buy:
+            usd_cash, _ = get_real_usd_cash()
+            # 预留 5% 缓冲，且单笔最多动用当前可用美元的 45%
+            max_ safe_usd = usd_cash * 0.45
+            max_affordable_qty = int(max_safe_usd // price)
+            if final_qty > max_affordable_qty and max_affordable_qty > 0:
+                print(f"⚠️ 自动校准股数: 原请求 {final_qty} 股超出单笔可用美元上限，已自动调整为 {max_affordable_qty} 股", flush=True)
+                final_qty = max_affordable_qty
+
+            # 再用长桥官方最大可买接口做二次校验
+            try:
+                est = trade_ctx.estimate_max_purchase_quantity(
+                    symbol=symbol,
+                    order_type=OrderType.LO,
+                    side=OrderSide.Buy,
+                    price=Decimal(str(round(price, 2)))
+                )
+                cash_max = int(getattr(est, "cash_max_qty", 0))
+                if cash_max > 0 and final_qty > cash_max:
+                    final_qty = int(cash_max * 0.95)
+            except Exception:
+                pass
+
+        if final_qty <= 0:
+            return "拦截：当前可用美元现金不足以买入该股票。"
+
         resp = trade_ctx.submit_order(
             symbol=symbol,
             order_type=OrderType.LO,
             side=order_side,
-            submitted_quantity=Decimal(str(int(quantity))),
+            submitted_quantity=Decimal(str(final_qty)),
             time_in_force=TimeInForceType.Day,
             submitted_price=Decimal(str(round(price, 2))),
             remark=f"FullAI: {reason[:28]}"
         )
-        return f"下单成功！[{side}] {symbol} {quantity}股 @ {price:.2f} USD, 订单号: {resp.order_id}"
+        # 等待 1.5 秒复核长桥后台是否真正接受该订单
+        time.sleep(1.5)
+        for o in trade_ctx.today_orders():
+            if o.order_id == resp.order_id:
+                if "Reject" in str(o.status):
+                    return f"下单被长桥拒绝！状态: {o.status}, 请将买入股数减半后重试！"
+                return f"下单成功！[{side}] {symbol} {final_qty}股 @ {price:.2f} USD, 实时状态: {o.status}, 订单号: {resp.order_id}"
+
+        return f"已提交订单！[{side}] {symbol} {final_qty}股 @ {price:.2f} USD, 订单号: {resp.order_id}"
     except Exception as e:
-        return f"下单失败（请检查可用资金或可卖股数）: {e}"
+        return f"下单报错: {e}"
 
 
 def cancel_pending_order(order_id: str) -> str:
-    """撤销尚未成交的挂单以释放资金或重新改价下单"""
     try:
         trade_ctx.cancel_order(order_id)
         return f"撤单成功！已撤销订单号: {order_id}"
@@ -125,7 +180,7 @@ tools = [
         "type": "function",
         "function": {
             "name": "get_account_status",
-            "description": "查询模拟盘账户全部可用现金、净资产、当前持仓股数与成本价、以及今日订单记录",
+            "description": "查询已折算为真实美元(USD)的账户可用现金、总资产、当前持仓及今日订单记录",
             "parameters": {"type": "object", "properties": {}}
         }
     },
@@ -133,7 +188,7 @@ tools = [
         "type": "function",
         "function": {
             "name": "get_us_stock_quote",
-            "description": "批量获取美股实时报价与涨跌幅，可传入任意美股代码列表",
+            "description": "批量获取美股实时报价与涨跌幅",
             "parameters": {
                 "type": "object",
                 "properties": {"symbols": {"type": "array", "items": {"type": "string"}}},
@@ -157,7 +212,7 @@ tools = [
         "type": "function",
         "function": {
             "name": "place_paper_limit_order",
-            "description": "提交美股限价单（Buy买入 / Sell卖出），股数 quantity 由你根据账户现金自主计算",
+            "description": "提交美股限价单（Buy买入 / Sell卖出）",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -175,7 +230,7 @@ tools = [
         "type": "function",
         "function": {
             "name": "cancel_pending_order",
-            "description": "根据 order_id 撤销未成交的挂单，释放购买力或可卖持仓",
+            "description": "根据 order_id 撤销未成交的挂单",
             "parameters": {
                 "type": "object",
                 "properties": {"order_id": {"type": "string"}},
@@ -189,20 +244,19 @@ tools = [
 def run_trading_cycle():
     print(f"\n================ 🚀 AI 全权基金经理巡检: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ================", flush=True)
     strategy_prompt = """
-    你现在拥有我长桥美股模拟账户的 100% 最高全权托管权限！你的唯一目标是：充分利用账户资金，实现账户净资产（net_assets）最大化！
+    你拥有我长桥美股模拟账户的 100% 最高全权托管权限！目标是实现账户净资产最大化。
 
-    请按以下步骤自主决策并执行交易：
-    1. 调用 `get_account_status` 查清当前有多少可用现金（total_cash）、已有持仓及未成交挂单。
-       - 如果有长时间未成交（如 Status 为 New 或 WaitToNew 但价格已偏离现价）的挂单，可调用 `cancel_pending_order` 撤单释放资金。
+    请严格按以下步骤操作：
+    1. 调用 `get_account_status` 查看【当前真实可用美元现金】（已经自动从港币折算为真实 USD）。
+       - 若有长时间未成交的挂单，调用 `cancel_pending_order` 撤销。
     2. 调用 `get_us_stock_quote` 扫描全市场高弹性标的池：
-       - 核心科技与高弹性牛股：['NVDA.US', 'TSLA.US', 'AAPL.US', 'AMD.US', 'PLTR.US', 'META.US', 'MSFT.US', 'AVGO.US', 'COIN.US', 'MSTR.US']
-       - 3倍杠杆多空ETF（大盘涨买多，大盘跌买空）：['TQQQ.US', 'SQQQ.US', 'SOXL.US', 'SOXS.US']
-    3. 对你最看好的 2~3 只标的或当前持仓标的，调用 `get_kline_trend` 查看 15 分钟 K 线与 MA5/MA10 均线趋势。
-    4. 【全权仓位管理与主动换仓规则】：
-       - 对于已有持仓：若短线趋势走弱、跌破均线或亏损达 -1.5% 以上，果断卖出（Sell）止损换股；若盈利丰厚且出现滞涨，果断卖出止盈；若趋势极强（最新价站稳 MA5 之上且放量突破），允许继续持有甚至加仓！
-       - 对于可用现金：不要让大量现金闲置！请将账户 80%~95% 的资金分配到当前日内动能最强、K线处于上升趋势的 2~4 只标的上。
-       - 【股数计算方法】：根据你想分配给该股票的美元金额除以当前最新价，计算出整数股数 `quantity`（例如打算买 20000 美元、股价 350 美元，就买 57 股，不再受 5 股限制！）。为了确保限价单快速成交，买入限价可设在最新价或比最新价高 0.05~0.10 USD，卖出限价可设在最新价或比最新价低 0.05~0.10 USD。
-    5. 执行完所有买卖操作后，输出你本轮的持仓结构、资金利用率及操盘逻辑。
+       - 核心科技与热门股：['NVDA.US', 'TSLA.US', 'AAPL.US', 'AMD.US', 'PLTR.US', 'META.US', 'MSFT.US', 'AVGO.US', 'COIN.US', 'MSTR.US']
+       - 3倍杠杆多空ETF：['TQQQ.US', 'SQQQ.US', 'SOXL.US', 'SOXS.US']
+    3. 对看好的 2~3 只标的或当前持仓调用 `get_kline_trend` 检查 15 分钟 K 线与均线趋势。
+    4. 【仓位与下单规则】：
+       - 持仓股若亏损达 -1.5% 或跌破均线走弱，果断卖出（Sell）换股；若盈利达 +2.5% 以上且动能放缓，果断止盈。
+       - 买入新股时，请严格根据 `get_account_status` 返回的【当前真实可用美元现金】计算股数！单只股票分配 30%~40% 的可用美元现金（例如可用美元为 180,000 USD，单只分配 60,000 USD，除以股价算出整数股数）。
+       - 为保证限价单立刻成交，买入价可设在比最新价高 0.10 USD，卖出价可设在比最新价低 0.10 USD。
     """
     messages = [{"role": "user", "content": strategy_prompt}]
 
