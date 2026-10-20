@@ -20,7 +20,7 @@ client = OpenAI(
 )
 
 MODEL_NAME = "deepseek/deepseek-chat"
-RUN_MINUTES = int(os.environ.get("RUN_MINUTES", "18"))
+RUN_MINUTES = int(os.environ.get("RUN_MINUTES", "58"))
 
 
 def get_real_usd_cash() -> tuple[float, float]:
@@ -142,7 +142,6 @@ def place_paper_limit_order(symbol: str, side: str, quantity: int, price: float,
             if usd_cash < 100:
                 return f"拦截：当前剩余可用美元不足 ({usd_cash:.2f} USD)，无法继续买入。"
 
-            # 仅根据真实可用购买力上限与长桥接口最大股数做防报错校准，不设人为分仓上限
             max_affordable_qty = int((usd_cash * 0.98) // price)
             if final_qty > max_affordable_qty:
                 print(f"⚠️ 自动校准至最大可用资金股数: {final_qty} -> {max_affordable_qty} 股", flush=True)
@@ -160,7 +159,7 @@ def place_paper_limit_order(symbol: str, side: str, quantity: int, price: float,
                 broker_max = max(cash_max, margin_max)
 
                 if broker_max <= 0:
-                    return f"拦截：长桥返回 {symbol} 当前可买股数为 0，请换其他标的或使用现金额度！"
+                    return f"拦截：长桥返回 {symbol} 当前可买股数为 0，请换其他标的！"
                 if final_qty > int(broker_max * 0.98):
                     print(f"⚠️ 触发券商最大购买力校准: {final_qty} -> {int(broker_max * 0.98)} 股", flush=True)
                     final_qty = int(broker_max * 0.98)
@@ -274,36 +273,47 @@ tools = [
 
 def run_trading_cycle():
     print(f"\n================ 🚀 AI 极限收益全权操盘: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ================", flush=True)
-        strategy_prompt = """
+    strategy_prompt = """
     你是顶级华尔街量化与日内交易专家，拥有该美股模拟账户的 100% 绝对控制权！
-    
+    唯一核心目标：发挥你的全部交易智慧，不设人为条条框框，实现账户净资产的极限增长。
+
     【⚠️ 极其重要：当前处于全自动无人值守后台，没有任何人类能回复你！】
-    绝对禁止在只查完账户后就停下来向我汇报或询问“是否需要进一步分析/请指示”！你必须在本次唤醒中，通过连续调用工具一次性独立走完以下全部动作，最后再输出总结：
+    绝对禁止在只查完账户后就停下来汇报或询问“是否需要进一步分析/请指示”！你必须在本次唤醒中，连续调用工具一次性独立走完以下全部流程：
 
     第 1 步（必做）：调用 `get_account_status` 查看当前购买力、持仓及未成交挂单（若有未成交旧挂单，立即调用 `cancel_pending_order` 撤销）。
     第 2 步（必做）：紧接着立即调用 `get_us_stock_quote` 扫描市场实时行情，包含你当前的全部持仓股，以及高弹性池：['NVDA.US', 'TSLA.US', 'AMD.US', 'PLTR.US', 'META.US', 'AVGO.US', 'COIN.US', 'MSTR.US', 'SMCI.US', 'APP.US', 'TQQQ.US', 'SQQQ.US', 'SOXL.US', 'SOXS.US', 'TSLL.US', 'NVDL.US']。
     第 3 步（必做）：针对你当前的所有持仓股，以及第 2 步中涨幅/异动最强的 2~3 只潜力股，立即调用 `get_kline_trend` 查看 `5m` 或 `15m` K线与均线趋势。
     第 4 步（自主果断下单）：
-       - 综合K线与量价关系，若持仓股趋势走坏或跌破支撑，立即调用 `place_paper_limit_order` 卖出（Sell）腾出资金；
-       - 若发现极强单边突破或主升浪标的，且账户还有可用购买力（或刚卖出换仓），立即调用 `place_paper_limit_order` 买入（Buy）或加仓！
+       - 综合K线与量价关系，若持仓股趋势走弱或跌破支撑，立即调用 `place_paper_limit_order` 卖出（Sell）换仓；
+       - 若发现极强单边突破或主升浪标的，且账户还有可用购买力（或刚卖出腾出资金），立即调用 `place_paper_limit_order` 买入（Buy）或加仓！
        - 不设固定的持仓数量与仓位比例限制，唯独禁止同时持有同一方向相反的杠杆ETF（如 TQQQ 与 SQQQ）。
        - 为确保限价单立刻成交，买入限价设在比最新价高 0.15 USD，卖出限价设在比最新价低 0.15 USD。
-    第 5 步：当你已经实际调用完上述看盘与交易工具后，最后输出一份简短的操盘复盘报告。
+    第 5 步：只有当你真正执行完上述看盘、K线分析与交易操作后，才输出最终操盘报告。
     """
-
     messages = [{"role": "user", "content": strategy_prompt}]
+    has_checked_market = False
 
     for _ in range(20):
         response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=messages,
             tools=tools,
-            temperature=0.4
+            temperature=0.3
         )
         msg = response.choices[0].message
         messages.append(msg)
 
         if not msg.tool_calls:
+            # 防偷懒机制：如果 AI 还没查行情或K线就想停下来问“请指示”，强制踹它继续执行
+            if not has_checked_market:
+                print("⚠️ 检测到 AI 试图提前结束汇报，正在强制唤醒继续扫描行情与K线...", flush=True)
+                messages.append({
+                    "role": "user",
+                    "content": "当前是无人值守后台，禁止向我请示！请立即调用 get_us_stock_quote 和 get_kline_trend 分析持仓与全市场行情，并自主决定是否调用 place_paper_limit_order 下单交易！"
+                })
+                has_checked_market = True
+                continue
+
             print("\n🤖 AI 操盘决策报告：\n", msg.content, flush=True)
             break
 
@@ -311,6 +321,9 @@ def run_trading_cycle():
             fn_name = tool_call.function.name
             args = json.loads(tool_call.function.arguments or "{}")
             print(f"⚙️ 执行指令: {fn_name}({args})", flush=True)
+
+            if fn_name in ("get_us_stock_quote", "get_kline_trend"):
+                has_checked_market = True
 
             if fn_name == "get_account_status":
                 res = get_account_status()
@@ -334,7 +347,7 @@ run_trading_cycle()
 
 while (time.time() - start_time) < (RUN_MINUTES * 60):
     time.sleep(5)
-    # 1. 每隔 4 分钟主动唤醒一次 AI 扫描全市场新机会（即使当前空仓也能捕捉暴涨股）
+    # 1. 每隔 4 分钟主动唤醒一次 AI 扫描全市场新机会
     if (time.time() - last_ai_run) >= 240:
         print("⏰ 到达 4 分钟定期巡检节点，唤醒 AI 扫描市场机会！", flush=True)
         run_trading_cycle()
@@ -354,7 +367,6 @@ while (time.time() - start_time) < (RUN_MINUTES * 60):
             cost_p = cost_map[q.symbol]
             pnl_pct = ((last_p - cost_p) / cost_p) * 100
             print(f"⚡ [5秒高频盯盘] {q.symbol} 现价:{last_p:.2f} USD, 成本:{cost_p:.2f} USD, 浮盈亏:{pnl_pct:+.2f}%", flush=True)
-            # 当单票盈利突破 4% 或回撤达 -2.5%（且距离上次唤醒超过60秒防刷屏）时，唤醒 AI 自主决定是否让利润奔跑或止损
             if (pnl_pct >= 4.0 or pnl_pct <= -2.5) and (time.time() - last_ai_run) >= 60:
                 print(f"🚨 持仓大幅波动 ({pnl_pct:+.2f}%)，立即唤醒 AI 评估趋势！", flush=True)
                 run_trading_cycle()
