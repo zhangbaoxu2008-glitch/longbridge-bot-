@@ -9,7 +9,6 @@ from longbridge.openapi import (
     OrderType, OrderSide, TimeInForceType
 )
 
-# 自动从 GitHub Secrets 保险箱读取密钥（无需在此处手填）
 OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"].strip()
 lb_config = Config.from_apikey_env()
 quote_ctx = QuoteContext(lb_config)
@@ -21,7 +20,6 @@ client = OpenAI(
 )
 
 MODEL_NAME = "deepseek/deepseek-chat"
-# 单次任务持续极速盯盘的分钟数（默认跑 18 分钟，配合每 20 分钟一次的定时任务实现整晚无缝盯盘）
 RUN_MINUTES = int(os.environ.get("RUN_MINUTES", "18"))
 
 
@@ -53,7 +51,7 @@ def get_us_stock_quote(symbols: list[str]) -> str:
         last_p = float(q.last_done)
         open_p = float(q.open) if float(q.open) > 0 else last_p
         chg = ((last_p - open_p) / open_p) * 100
-        lines.append(f"代码: {q.symbol}, 最新价: {last_p:.2f}, 今开: {open_p:.2f}, 日内涨跌: {chg:+.2f}%")
+        lines.append(f"代码: {q.symbol}, 最新价: {last_p:.2f} USD, 今开: {open_p:.2f} USD, 日内涨跌: {chg:+.2f}%")
     return "\n".join(lines)
 
 
@@ -70,7 +68,7 @@ def place_paper_limit_order(symbol: str, side: str, quantity: int, price: float,
         submitted_price=Decimal(str(round(price, 2))),
         remark=f"GH_Bot: {reason[:30]}"
     )
-    return f"模拟盘下单成功！[{side}] {symbol} {quantity}股 @ ${price:.2f}, 订单号: {resp.order_id}"
+    return f"模拟盘下单成功！[{side}] {symbol} {quantity}股 @ {price:.2f} USD, 订单号: {resp.order_id}"
 
 
 tools = [
@@ -161,7 +159,6 @@ def run_trading_cycle():
             messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": str(res)})
 
 
-# 启动运行：先做一次完整 AI 巡检，随后在设定分钟数内每 5 秒极速监控止盈止损
 start_time = time.time()
 run_trading_cycle()
 
@@ -178,7 +175,7 @@ while (time.time() - start_time) < (RUN_MINUTES * 60):
             last_p = float(q.last_done)
             cost_p = cost_map[q.symbol]
             pnl_pct = ((last_p - cost_p) / cost_p) * 100
-            print(f"⚡ [5秒云端盯盘] {q.symbol} 现价:${last_p:.2f} \vert{} 成本:${cost_p:.2f} | 盈亏:{pnl_pct:+.2f}%", flush=True)
+            print(f"⚡ [5秒云端盯盘] {q.symbol} 现价:{last_p:.2f} USD, 成本:{cost_p:.2f} USD, 盈亏:{pnl_pct:+.2f}%", flush=True)
             if pnl_pct >= 3.0 or pnl_pct <= -2.0:
                 print(f"🚨 触发止盈/止损线 ({pnl_pct:+.2f}%)，立即唤醒 AI！", flush=True)
                 run_trading_cycle()
