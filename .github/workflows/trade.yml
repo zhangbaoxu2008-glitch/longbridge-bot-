@@ -1,17 +1,17 @@
 name: Longbridge US Stock AI Bot
 
 on:
-  # 1. 允许你在手机上随时手动点一下按钮测试运行
+  # 1. 允许手动点击测试运行
   workflow_dispatch:
 
-  # 2. 自动定时任务（按 UTC 国际标准时间计算，对应香港时间周一至周五美股开盘时段 21:30 - 04:00）
+  # 2. 改为每小时的 00 分和 30 分各触发一次防漏单（对应香港时间 21:00 - 次日 04:59）
   schedule:
-    - cron: '*/20 13-20 * * 1-5'
+    - cron: '0,30 13-20 * * 1-5'
 
 jobs:
   trade:
     runs-on: ubuntu-latest
-    # 防止任务重叠运行
+    # 防止任务重叠运行：如果上一轮还在跑，新触发的任务直接排队接力
     concurrency:
       group: trading-bot
       cancel-in-progress: false
@@ -33,7 +33,7 @@ jobs:
           LONGBRIDGE_APP_KEY: ${{ secrets.LONGBRIDGE_APP_KEY }}
           LONGBRIDGE_APP_SECRET: ${{ secrets.LONGBRIDGE_APP_SECRET }}
           LONGBRIDGE_ACCESS_TOKEN: ${{ secrets.LONGBRIDGE_ACCESS_TOKEN }}
-          # 私有仓库如果想省免费额度，可以把下面的 18 改成 0（代表每20分钟只跑一次AI巡检，不跑5秒循环）
-          # 公开仓库不限免费额度，保持 18 即可实现整晚每 5 秒无缝盯盘
-          RUN_MINUTES: "18"
+          # 改为单次连续狂跑 58 分钟（将近1小时不断线）！
+          # 即使手动点一次，也能连续盯盘整整 1 小时；配合上方每 30 分钟一次的唤醒信号，实现整晚零断档接力
+          RUN_MINUTES: "58"
         run: python bot.py
