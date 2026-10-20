@@ -1,0 +1,39 @@
+name: Longbridge US Stock AI Bot
+
+on:
+  # 1. 允许你在手机上随时手动点一下按钮测试运行
+  workflow_dispatch:
+
+  # 2. 自动定时任务（按 UTC 国际标准时间计算，对应香港时间周一至周五美股开盘时段 21:30 - 04:00）
+  schedule:
+    - cron: '*/20 13-20 * * 1-5'
+
+jobs:
+  trade:
+    runs-on: ubuntu-latest
+    # 防止任务重叠运行
+    concurrency:
+      group: trading-bot
+      cancel-in-progress: false
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装长桥与 OpenAI 依赖库
+        run: pip install -q openai longbridge
+
+      - name: 启动 AI 盯盘机器人
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          LONGBRIDGE_APP_KEY: ${{ secrets.LONGBRIDGE_APP_KEY }}
+          LONGBRIDGE_APP_SECRET: ${{ secrets.LONGBRIDGE_APP_SECRET }}
+          LONGBRIDGE_ACCESS_TOKEN: ${{ secrets.LONGBRIDGE_ACCESS_TOKEN }}
+          # 私有仓库如果想省免费额度，可以把下面的 18 改成 0（代表每20分钟只跑一次AI巡检，不跑5秒循环）
+          # 公开仓库不限免费额度，保持 18 即可实现整晚每 5 秒无缝盯盘
+          RUN_MINUTES: "18"
+        run: python bot.py
