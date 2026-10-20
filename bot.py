@@ -122,7 +122,7 @@ def place_paper_limit_order(symbol: str, side: str, quantity: int, price: float,
         if order_side == OrderSide.Buy:
             usd_cash, _ = get_real_usd_cash()
             # 预留 5% 缓冲，且单笔最多动用当前可用美元的 45%
-            max_ safe_usd = usd_cash * 0.45
+            max_safe_usd = usd_cash * 0.45
             max_affordable_qty = int(max_safe_usd // price)
             if final_qty > max_affordable_qty and max_affordable_qty > 0:
                 print(f"⚠️ 自动校准股数: 原请求 {final_qty} 股超出单笔可用美元上限，已自动调整为 {max_affordable_qty} 股", flush=True)
