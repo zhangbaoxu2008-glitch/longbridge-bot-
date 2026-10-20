@@ -275,20 +275,16 @@ def run_trading_cycle():
     print(f"\n================ 🚀 AI 极限收益全权操盘: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ================", flush=True)
     strategy_prompt = """
     你是顶级华尔街量化与日内交易专家，拥有该美股模拟账户的 100% 绝对控制权！
-    唯一核心目标：发挥你的全部交易智慧，不设人为条条框框，实现账户净资产的极限增长。
+    目标：实现账户净资产增长，赚最多钱。
 
     【⚠️ 极其重要：当前处于全自动无人值守后台，没有任何人类能回复你！】
-    绝对禁止在只查完账户后就停下来汇报或询问“是否需要进一步分析/请指示”！你必须在本次唤醒中，连续调用工具一次性独立走完以下全部流程：
+    可调用工具：
 
-    第 1 步（必做）：调用 `get_account_status` 查看当前购买力、持仓及未成交挂单（若有未成交旧挂单，立即调用 `cancel_pending_order` 撤销）。
-    第 2 步（必做）：紧接着立即调用 `get_us_stock_quote` 扫描市场实时行情，包含你当前的全部持仓股，以及高弹性池：['NVDA.US', 'TSLA.US', 'AMD.US', 'PLTR.US', 'META.US', 'AVGO.US', 'COIN.US', 'MSTR.US', 'SMCI.US', 'APP.US', 'TQQQ.US', 'SQQQ.US', 'SOXL.US', 'SOXS.US', 'TSLL.US', 'NVDL.US']。
-    第 3 步（必做）：针对你当前的所有持仓股，以及第 2 步中涨幅/异动最强的 2~3 只潜力股，立即调用 `get_kline_trend` 查看 `5m` 或 `15m` K线与均线趋势。
-    第 4 步（自主果断下单）：
-       - 综合K线与量价关系，若持仓股趋势走弱或跌破支撑，立即调用 `place_paper_limit_order` 卖出（Sell）换仓；
-       - 若发现极强单边突破或主升浪标的，且账户还有可用购买力（或刚卖出腾出资金），立即调用 `place_paper_limit_order` 买入（Buy）或加仓！
-       - 不设固定的持仓数量与仓位比例限制，唯独禁止同时持有同一方向相反的杠杆ETF（如 TQQQ 与 SQQQ）。
-       - 为确保限价单立刻成交，买入限价设在比最新价高 0.15 USD，卖出限价设在比最新价低 0.15 USD。
-    第 5 步：只有当你真正执行完上述看盘、K线分析与交易操作后，才输出最终操盘报告。
+    调用 `get_account_status` 可查看当前购买力、持仓及未成交挂单（若有未成交旧挂单，可调用 `cancel_pending_order` 撤销）。
+    调用 `get_us_stock_quote` 可扫描市场实时行情，包含你当前的全部持仓股，以及高弹性池：['NVDA.US', 'TSLA.US', 'AMD.US', 'PLTR.US', 'META.US', 'AVGO.US', 'COIN.US', 'MSTR.US', 'SMCI.US', 'APP.US', 'TQQQ.US', 'SQQQ.US', 'SOXL.US', 'SOXS.US', 'TSLL.US', 'NVDL.US']。
+    调用 `get_kline_trend` 可查看 `5m` 或 `15m` K线与均线趋势。
+    调用 `place_paper_limit_order` 可卖出（Sell）换仓；
+    调用 `place_paper_limit_order` 可买入（Buy）或加仓！
     """
     messages = [{"role": "user", "content": strategy_prompt}]
     has_checked_market = False
