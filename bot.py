@@ -32,7 +32,7 @@ def get_real_usd_cash() -> tuple[float, float]:
         usd_cash = float(b.total_cash) / rate
         usd_net = float(b.net_assets) / rate
 
-        # 累加所有币种的可用现金（绝对不能用 max(0.0) 忽略负数美元欠款！）
+        # 累加所有币种的可用现金（包含负数的美元跨币种欠款，不可用 max(0.0) 抹零）
         cash_infos = getattr(b, "cash_infos", [])
         if cash_infos:
             net_avail_usd = 0.0
@@ -41,7 +41,7 @@ def get_real_usd_cash() -> tuple[float, float]:
                 net_avail_usd += float(ci.available_cash) / c_rate
             usd_cash = min(usd_cash, net_avail_usd)
 
-        # 如果长桥返回了剩余可融资额度，取更小值防止超融资上限
+        # 检查剩余可融资额度，取更小值防止超出长桥融资上限
         rem_finance = getattr(b, "remaining_finance_amount", None)
         if rem_finance is not None:
             usd_cash = min(usd_cash, float(rem_finance) / rate)
@@ -49,14 +49,13 @@ def get_real_usd_cash() -> tuple[float, float]:
     return round(max(0.0, usd_cash), 2), round(usd_net, 2)
 
 
-
 def get_account_status() -> str:
     """获取已自动换算为美元(USD)的真实可用资金、当前持仓与今日订单"""
     usd_cash, usd_net = get_real_usd_cash()
     info = [
-        f"【账户真实美元资产（已将港币按7.82折算为USD）】\n"
-        f"当前真实可用美元现金: {usd_cash:.2f} USD (下单总金额绝对不能超过此数字！)\n"
-        f"当前单笔买单建议上限(35%仓位): {usd_cash * 0.35:.2f} USD\n"
+        f"【账户真实美元资产（已扣除美元欠款并按7.82折算港币）】\n"
+        f"当前真实剩余可用美元额度: {usd_cash:.2f} USD (下单总金额绝对不能超过此数字！)\n"
+        f"当前单笔买单建议上限(35%可用额度): {usd_cash * 0.35:.2f} USD\n"
         f"账户折合美元总净资产: {usd_net:.2f} USD"
     ]
 
@@ -125,9 +124,9 @@ def place_paper_limit_order(symbol: str, side: str, quantity: int, price: float,
         order_side = OrderSide.Buy if side.lower() == "buy" else OrderSide.Sell
         final_qty = int(quantity)
 
+        # 如果是买入，自动检查真实可用美元与长桥官方可买上限
         if order_side == OrderSide.Buy:
             usd_cash, _ = get_real_usd_cash()
-            # 账户可用资金低于 2000 美元时直接禁止开新仓
             if usd_cash < 2000:
                 return f"拦截：当前剩余可用美元不足 ({usd_cash:.2f} USD)，已停止买入新标的，请勿重试！"
 
@@ -135,10 +134,10 @@ def place_paper_limit_order(symbol: str, side: str, quantity: int, price: float,
             max_safe_usd = usd_cash * 0.40
             max_affordable_qty = int(max_safe_usd // price)
             if final_qty > max_affordable_qty:
-                print(f"⚠️ 自动校准股数: 原请求 {final_qty} 股超出单笔可用上限，调整为 {max_affordable_qty} 股", flush=True)
+                print(f"⚠️ 自动校准股数: 原请求 {final_qty} 股超出单笔可用上限，已自动调整为 {max_affordable_qty} 股", flush=True)
                 final_qty = max_affordable_qty
 
-            # 使用长桥官方接口同时检查【现金可买】与【融资可买】上限
+            # 使用长桥官方接口同时校验【现金可买】与【融资可买】最大股数
             try:
                 est = trade_ctx.estimate_max_purchase_quantity(
                     symbol=symbol,
@@ -151,14 +150,15 @@ def place_paper_limit_order(symbol: str, side: str, quantity: int, price: float,
                 broker_max = max(cash_max, margin_max)
 
                 if broker_max <= 0:
-                    return f"拦截：长桥返回 {symbol} 当前可买/可融资股数为 0（额度已满或该ETF不支持融资），请放弃买入该标的，切勿重试！"
+                    return f"拦截：长桥返回 {symbol} 当前可买/可融资股数为 0（融资额度已满或该ETF不支持融资），请立即放弃买入该标的，切勿重试！"
                 if final_qty > int(broker_max * 0.90):
+                    print(f"⚠️ 触发长桥风控上限校准: 股数从 {final_qty} 调整为 {int(broker_max * 0.90)}", flush=True)
                     final_qty = int(broker_max * 0.90)
             except Exception as e:
                 print(f"估算最大可买股数异常: {e}", flush=True)
 
         if final_qty <= 0:
-            return "拦截：当前可用资金或融资额度不足以买入 1 股，请停止买入操作！"
+            return "拦截：当前可用资金或融资额度不足以买入该股票，请立即停止买入操作，切勿重试！"
 
         resp = trade_ctx.submit_order(
             symbol=symbol,
@@ -169,17 +169,17 @@ def place_paper_limit_order(symbol: str, side: str, quantity: int, price: float,
             submitted_price=Decimal(str(round(price, 2))),
             remark=f"FullAI: {reason[:28]}"
         )
+        # 等待 1.5 秒复核长桥后台是否真正接受该订单
         time.sleep(1.5)
         for o in trade_ctx.today_orders():
             if o.order_id == resp.order_id:
                 if "Reject" in str(o.status):
-                    return f"下单被长桥拒绝（状态: {o.status}），说明融资额度已满或标的不支持融资，请立即放弃买入该股票，不要减半重试！"
+                    return f"下单被长桥拒绝（状态: {o.status}），说明融资额度已满或该标的不支持融资，请立即放弃买入该股票，绝不要减半重试！"
                 return f"下单成功！[{side}] {symbol} {final_qty}股 @ {price:.2f} USD, 实时状态: {o.status}, 订单号: {resp.order_id}"
 
         return f"已提交订单！[{side}] {symbol} {final_qty}股 @ {price:.2f} USD, 订单号: {resp.order_id}"
     except Exception as e:
         return f"下单报错: {e}（请放弃该笔买入，不要重试）"
-
 
 
 def cancel_pending_order(order_id: str) -> str:
@@ -262,21 +262,20 @@ def run_trading_cycle():
     你拥有我长桥美股模拟账户的 100% 最高全权托管权限！目标是实现账户净资产最大化。
 
     请严格按以下步骤操作：
-    1. 调用 `get_account_status` 查看【当前真实可用美元现金】（已经自动从港币折算为真实 USD）。
-       - 若有长时间未成交的挂单，调用 `cancel_pending_order` 撤销。
+    1. 调用 `get_account_status` 查看【当前真实剩余可用美元额度】与【当前持仓】。
+       - 若有未成交的挂单（New / WaitToNew），先调用 `cancel_pending_order` 撤销。
     2. 调用 `get_us_stock_quote` 扫描全市场高弹性标的池：
        - 核心科技与热门股：['NVDA.US', 'TSLA.US', 'AAPL.US', 'AMD.US', 'PLTR.US', 'META.US', 'MSFT.US', 'AVGO.US', 'COIN.US', 'MSTR.US']
        - 3倍杠杆多空ETF：['TQQQ.US', 'SQQQ.US', 'SOXL.US', 'SOXS.US']
     3. 对看好的 2~3 只标的或当前持仓调用 `get_kline_trend` 检查 15 分钟 K 线与均线趋势。
-           - 严禁同时买入或持有同一板块的正反向 ETF（例如绝不能同时买入 SOXL 和 SOXS，或同时买入 TQQQ 和 SQQQ）！
-       - 全账户最多同时持有 3 只股票；若下单返回“拦截”或“拒绝”，立即停止买入，绝不要减半股数重复提交！
-    4. 【仓位与下单规则】：
+    4. 【仓位与下单铁律】：
        - 持仓股若亏损达 -1.5% 或跌破均线走弱，果断卖出（Sell）换股；若盈利达 +2.5% 以上且动能放缓，果断止盈。
-       - 买入新股时，请严格根据 `get_account_status` 返回的【当前真实可用美元现金】计算股数！...
-       - 为保证限价单立刻成交，买入价可设在比最新价高 0.10 USD，卖出价可设在比最新价低 0.10 USD。
-       -严禁同时买入或持有同一板块的正反向 ETF（例如绝不能同时买入 SOXL 和 SOXS，或同时买入 TQQQ 和 SQQQ）！
-       - 全账户最多同时持有 3 只股票；若下单返回“拦截”或“拒绝”，立即停止买入，绝不要减半股数重复提交！
-"""
+       - 全账户最多同时持有 2~3 只股票！如果当前已经持有 2~3 只股票或剩余可用美元低于 5,000 USD，不要再买入新股，除非先卖出旧持仓。
+       - 严禁同时买入或持有同一方向相反的杠杆 ETF（例如绝不能同时买入 SOXL.US 和 SOXS.US，或同时买入 TQQQ.US 和 SQQQ.US）！
+       - 买入新股时，单只股票分配 30%~35% 的【当前真实剩余可用美元额度】。
+       - 若 `place_paper_limit_order` 返回“拦截”或“拒绝”，请立即放弃买入该标的，绝对不要减半股数重复提交！
+       - 为保证限价单立刻成交，买入价设在比最新价高 0.10 USD，卖出价设在比最新价低 0.10 USD。
+    """
     messages = [{"role": "user", "content": strategy_prompt}]
 
     for _ in range(10):
