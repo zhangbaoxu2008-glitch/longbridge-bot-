@@ -130,44 +130,12 @@ def get_kline_trend(symbol: str, period: str = "15m") -> str:
 
 
 def place_paper_limit_order(symbol: str, side: str, quantity: int, price: float, reason: str) -> str:
-    """提交限价单，解除人为仓位比例限制，仅保留券商真实购买力上限校准"""
+    """提交限价单，无资金底线与购买力校准限制"""
     if quantity <= 0:
         return "拦截：下单股数必须大于 0。"
     try:
         order_side = OrderSide.Buy if side.lower() == "buy" else OrderSide.Sell
         final_qty = int(quantity)
-
-        if order_side == OrderSide.Buy:
-            usd_cash, _ = get_real_usd_cash()
-            if usd_cash < 100:
-                return f"拦截：当前剩余可用美元不足 ({usd_cash:.2f} USD)，无法继续买入。"
-
-            max_affordable_qty = int((usd_cash * 0.98) // price)
-            if final_qty > max_affordable_qty:
-                print(f"⚠️ 自动校准至最大可用资金股数: {final_qty} -> {max_affordable_qty} 股", flush=True)
-                final_qty = max_affordable_qty
-
-            try:
-                est = trade_ctx.estimate_max_purchase_quantity(
-                    symbol=symbol,
-                    order_type=OrderType.LO,
-                    side=OrderSide.Buy,
-                    price=Decimal(str(round(price, 2)))
-                )
-                cash_max = int(getattr(est, "cash_max_qty", 0))
-                margin_max = int(getattr(est, "margin_max_qty", 0))
-                broker_max = max(cash_max, margin_max)
-
-                if broker_max <= 0:
-                    return f"拦截：长桥返回 {symbol} 当前可买股数为 0，请换其他标的！"
-                if final_qty > int(broker_max * 0.98):
-                    print(f"⚠️ 触发券商最大购买力校准: {final_qty} -> {int(broker_max * 0.98)} 股", flush=True)
-                    final_qty = int(broker_max * 0.98)
-            except Exception as e:
-                print(f"估算最大可买股数异常: {e}", flush=True)
-
-        if final_qty <= 0:
-            return "拦截：当前可用资金不足以买入 1 股该股票。"
 
         resp = trade_ctx.submit_order(
             symbol=symbol,
@@ -287,29 +255,32 @@ def run_trading_cycle():
     调用 `place_paper_limit_order` 可买入（Buy）或加仓！
     """
     messages = [{"role": "user", "content": strategy_prompt}]
-    has_checked_market = False
 
-    for _ in range(20):
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages,
-            tools=tools,
-            temperature=0.3
-        )
-        msg = response.choices[0].message
+    while True:
+        msg = None
+        for attempt in range(5):
+            try:
+                response = client.chat.completions.create(
+                    model=MODEL_NAME,
+                    messages=messages,
+                    tools=tools,
+                    temperature=0.3
+                )
+                if response and getattr(response, "choices", None):
+                    msg = response.choices[0].message
+                    break
+                print(f"⚠️ OpenRouter 返回空数据 (第 {attempt + 1}/5 次重试)，等待 5 秒...", flush=True)
+            except Exception as e:
+                print(f"⚠️ 请求 OpenRouter 报错: {e} (第 {attempt + 1}/5 次重试)，等待 5 秒...", flush=True)
+            time.sleep(5)
+
+        if msg is None:
+            print("❌ 连续 5 次请求 AI 失败，跳过本轮分析，继续后台盯盘...", flush=True)
+            break
+
         messages.append(msg)
 
         if not msg.tool_calls:
-            # 防偷懒机制：如果 AI 还没查行情或K线就想停下来问“请指示”，强制踹它继续执行
-            if not has_checked_market:
-                print("⚠️ 检测到 AI 试图提前结束汇报，正在强制唤醒继续扫描行情与K线...", flush=True)
-                messages.append({
-                    "role": "user",
-                    "content": "当前是无人值守后台，禁止向我请示！请立即调用 get_us_stock_quote 和 get_kline_trend 分析持仓与全市场行情，并自主决定是否调用 place_paper_limit_order 下单交易！"
-                })
-                has_checked_market = True
-                continue
-
             print("\n🤖 AI 操盘决策报告：\n", msg.content, flush=True)
             break
 
@@ -317,9 +288,6 @@ def run_trading_cycle():
             fn_name = tool_call.function.name
             args = json.loads(tool_call.function.arguments or "{}")
             print(f"⚙️ 执行指令: {fn_name}({args})", flush=True)
-
-            if fn_name in ("get_us_stock_quote", "get_kline_trend"):
-                has_checked_market = True
 
             if fn_name == "get_account_status":
                 res = get_account_status()
