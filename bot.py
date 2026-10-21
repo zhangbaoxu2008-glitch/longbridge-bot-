@@ -22,6 +22,13 @@ client = OpenAI(
 MODEL_NAME = "deepseek/deepseek-chat"
 RUN_MINUTES = int(os.environ.get("RUN_MINUTES", "58"))
 
+# 默认高弹性观察池（AI 随时可突破此列表查询全市场任意美股）
+DEFAULT_WATCHLIST = [
+    "NVDA.US", "TSLA.US", "AMD.US", "PLTR.US", "META.US", "AVGO.US",
+    "COIN.US", "MSTR.US", "SMCI.US", "APP.US", "TQQQ.US", "SQQQ.US",
+    "SOXL.US", "SOXS.US", "TSLL.US", "NVDL.US"
+]
+
 
 def get_real_usd_cash() -> tuple[float, float]:
     """获取真实折算后的可用美元现金（含融资购买力）与美元净资产"""
@@ -77,7 +84,6 @@ def get_account_status() -> str:
     orders = trade_ctx.today_orders()
     order_list = []
     for o in orders:
-        # 过滤掉已拒绝和已撤单的记录，确保所有未成交挂单（进行中）和已成交订单完整展示给 AI
         if "Reject" not in str(o.status) and "Cancel" not in str(o.status):
             order_list.append(
                 f"订单号: {o.order_id}, 代码: {o.symbol}, 方向: {o.side}, "
@@ -88,6 +94,8 @@ def get_account_status() -> str:
 
 
 def get_us_stock_quote(symbols: list[str]) -> str:
+    if not symbols:
+        return "未提供股票代码"
     quotes = quote_ctx.quote(symbols)
     lines = []
     for q in quotes:
@@ -103,6 +111,22 @@ def get_us_stock_quote(symbols: list[str]) -> str:
     return "\n".join(lines)
 
 
+def calc_rsi(closes: list[float], period: int = 14) -> float:
+    if len(closes) <= period:
+        return 50.0
+    gains, losses = [], []
+    for i in range(-period, 0):
+        diff = closes[i] - closes[i - 1]
+        gains.append(max(diff, 0.0))
+        losses.append(max(-diff, 0.0))
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return round(100.0 - (100.0 / (1.0 + rs)), 1)
+
+
 def get_kline_trend(symbol: str, period: str = "15m") -> str:
     period_map = {
         "5m": Period.Min_5,
@@ -112,21 +136,26 @@ def get_kline_trend(symbol: str, period: str = "15m") -> str:
     }
     p_enum = period_map.get(period, Period.Min_15)
     try:
-        klines = quote_ctx.candlesticks(symbol, p_enum, 20, AdjustType.NoAdjust)
+        klines = quote_ctx.candlesticks(symbol, p_enum, 30, AdjustType.NoAdjust)
     except Exception:
-        klines = quote_ctx.candlesticks(symbol, p_enum, 20)
+        klines = quote_ctx.candlesticks(symbol, p_enum, 30)
     if not klines:
         return f"{symbol} 暂无K线数据"
     closes = [float(k.close) for k in klines]
+    highs = [float(k.high) for k in klines]
+    lows = [float(k.low) for k in klines]
     ma5 = sum(closes[-5:]) / min(len(closes), 5)
     ma10 = sum(closes[-10:]) / min(len(closes), 10)
     ma20 = sum(closes[-20:]) / min(len(closes), 20)
+    rsi14 = calc_rsi(closes, 14)
     recent_bars = [
         f"收:{float(k.close):.2f}(高:{float(k.high):.2f}/低:{float(k.low):.2f}/量:{k.volume})"
         for k in klines[-8:]
     ]
     return (
-        f"【{symbol} ({period}) K线趋势】最新价: {closes[-1]:.2f} USD | MA5: {ma5:.2f}, MA10: {ma10:.2f}, MA20: {ma20:.2f}\n"
+        f"【{symbol} ({period}) 量化趋势】最新价: {closes[-1]:.2f} USD | "
+        f"MA5: {ma5:.2f}, MA10: {ma10:.2f}, MA20: {ma20:.2f} | RSI(14): {rsi14} | "
+        f"近20根最高: {max(highs[-20:]):.2f}, 最低: {min(lows[-20:]):.2f}\n"
         f"最近8根K线: " + " -> ".join(recent_bars)
     )
 
@@ -163,7 +192,7 @@ def place_paper_limit_order(symbol: str, side: str, quantity: int, price: float,
 def cancel_pending_order(order_id: str) -> str:
     try:
         trade_ctx.cancel_order(order_id)
-        time.sleep(1.5)  # 等待券商后台完成持仓股数或资金解冻
+        time.sleep(1.5)
         return f"撤单请求已提交！已撤销订单号: {order_id}"
     except Exception as e:
         return f"撤单失败: {e}"
@@ -174,7 +203,7 @@ tools = [
         "type": "function",
         "function": {
             "name": "get_account_status",
-            "description": "查询账户可用美元购买力、总净资产、当前持仓（含实时盈亏）及今日订单记录",
+            "description": "刷新查询账户最新可用美元购买力、总净资产、当前持仓及今日订单记录（撤单或下单后如需确认解冻状态可调用）",
             "parameters": {"type": "object", "properties": {}}
         }
     },
@@ -182,7 +211,7 @@ tools = [
         "type": "function",
         "function": {
             "name": "get_us_stock_quote",
-            "description": "批量获取任意美股或ETF的实时报价、涨跌幅与成交量（代码格式如 NVDA.US）",
+            "description": "批量获取全市场任意美股或ETF的实时报价、涨跌幅与成交量（代码格式如 NVDA.US、QQQ.US、UVXY.US 等）",
             "parameters": {
                 "type": "object",
                 "properties": {"symbols": {"type": "array", "items": {"type": "string"}}},
@@ -194,7 +223,7 @@ tools = [
         "type": "function",
         "function": {
             "name": "get_kline_trend",
-            "description": "获取指定美股的多周期 K 线走势、成交量与 MA5/MA10/MA20 均线数据",
+            "description": "获取指定美股的多周期 K 线走势、成交量、RSI(14)、区间高低点与 MA5/MA10/MA20 均线数据",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -202,7 +231,7 @@ tools = [
                     "period": {
                         "type": "string",
                         "enum": ["5m", "15m", "60m", "day"],
-                        "description": "K线周期：5m(超短线)、15m(日内波段)、60m(趋势)、day(日线)"
+                        "description": "K线周期：5m(超短线)、15m(日内波段)、60m(趋势)、day(日线大势)"
                     }
                 },
                 "required": ["symbol"]
@@ -242,26 +271,39 @@ tools = [
 ]
 
 
-def run_trading_cycle():
-    print(f"\n================ 🚀 AI 极限收益全权操盘: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ================", flush=True)
-    strategy_prompt = """
-    你是顶级交易专家，拥有该美股模拟账户的 100% 绝对控制权！
-    目标：实现账户净资产增长，赚最多钱。
+def run_trading_cycle(trigger_reason: str = "定期巡检"):
+    print(f"\n================ 🚀 AI 极限收益全权操盘 [{trigger_reason}]: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ================", flush=True)
 
-    【⚠️ 极其重要：当前处于全自动无人值守后台，没有任何人类能回复你！所以直接执行你的建议】
-    可调用工具：
+    # 预先在本地免费拉取账户状态与核心行情，省去 AI 前两轮固定工具调用的 Token 消耗
+    account_snapshot = get_account_status()
+    pos_resp = trade_ctx.stock_positions()
+    held_symbols = [p.symbol for ch in pos_resp.channels for p in ch.positions if int(p.quantity) > 0]
+    scan_symbols = list(dict.fromkeys(held_symbols + DEFAULT_WATCHLIST))
+    market_snapshot = get_us_stock_quote(scan_symbols)
 
-    调用 `get_account_status` 可查看当前购买力、持仓及未成交挂单（若有未成交旧挂单，可调用 `cancel_pending_order` 撤销）。
-    调用 `get_us_stock_quote` 可扫描市场实时行情，包含你当前的全部持仓股，以及高弹性池：['NVDA.US', 'TSLA.US', 'AMD.US', 'PLTR.US', 'META.US', 'AVGO.US', 'COIN.US', 'MSTR.US', 'SMCI.US', 'APP.US', 'TQQQ.US', 'SQQQ.US', 'SOXL.US', 'SOXS.US', 'TSLL.US', 'NVDL.US']。
-    调用 `get_kline_trend` 可查看 `5m` 或 `15m` K线与均线趋势。
-    调用 `place_paper_limit_order` 可卖出（Sell）换仓；
-    调用 `place_paper_limit_order` 可买入（Buy）或加仓！
+    strategy_prompt = f"""
+你是顶级交易专家，拥有该美股账户的绝对控制权！
+目标：实现账户净资产最大化增长，赚最多钱。
 
-    【💡 券商账户机制】：
+【⚠️ 极其重要：当前处于全自动无人值守后台，没有任何人类能回复你！所以直接通过工具执行你的全部决策和建议】
+
+=== 📊 当前账户实时状态 ===
+{account_snapshot}
+
+=== 📈 核心观察池及持仓股实时行情 ===
+{market_snapshot}
+
+可调用工具：
+调用 `get_us_stock_quote` 可查询全美股任意代码。
+调用 `get_kline_trend` 可自由组合查看 `5m`、`15m`、`60m` 或 `day` K线。同一回可合并发调用多个 `get_kline_trend`。
+调用 `place_paper_limit_order` 可卖出（Sell）换仓；
+调用 `place_paper_limit_order` 可买入（Buy）或加仓！
+
+ 【💡 券商账户机制】：
     1. 挂单占用机制：当你提交买入或卖出限价单后，只要该订单处于未成交的“进行中”状态（如 New / WaitToNew / PartialFilled），券商系统会自动冻结该笔订单对应的美元购买力或持仓股数（此时你在持仓里会看到 `持仓股数 > 0`，但 `可卖股数` 为 `0` 或减少）。
     2. 委托与撤单关系：如果某只股票已经有未成交的挂单，说明你之前的指令正在排队等待市场撮合（或当前处于非交易时段暂未撮合）。在旧挂单成交或彻底撤销前，同一批被冻结的股数/资金无法被重复提交下单，否则会被券商直接拒绝（Rejected）。
     3. 撤单解冻时间差：券商后台处理撤单并释放被冻结的股数/资金需要时间。如果你决定改价重挂，请先单独调用 `cancel_pending_order` 撤单，不要在同一个回合里同时并发调用 `cancel_pending_order` 和 `place_paper_limit_order`；等撤单返回后，再次调用 `get_account_status` 确认 `可卖股数` 或购买力已恢复，再提交新的买卖单。
-    """
+"""
     messages = [{"role": "user", "content": strategy_prompt}]
 
     while True:
@@ -272,7 +314,7 @@ def run_trading_cycle():
                     model=MODEL_NAME,
                     messages=messages,
                     tools=tools,
-                    temperature=0.3
+                    temperature=0.5
                 )
                 if response and getattr(response, "choices", None):
                     msg = response.choices[0].message
@@ -315,18 +357,21 @@ def run_trading_cycle():
 
 start_time = time.time()
 last_ai_run = time.time()
-run_trading_cycle()
+# 记录每只持仓股上次触发异动唤醒时的盈亏百分比，防止 AI 决定格局锁仓后每分钟被重复唤醒扣费
+last_alert_pnl: dict[str, float] = {}
+
+run_trading_cycle(trigger_reason="启动首轮建仓/巡检")
 
 while (time.time() - start_time) < (RUN_MINUTES * 60):
     time.sleep(5)
-    # 1. 每隔 4 分钟主动唤醒一次 AI 扫描全市场新机会
-    if (time.time() - last_ai_run) >= 240:
-        print("⏰ 到达 4 分钟定期巡检节点，唤醒 AI 扫描市场机会！", flush=True)
-        run_trading_cycle()
+    # 1. 每隔 15 分钟（900秒）主动唤醒一次 AI 扫描全市场新机会
+    if (time.time() - last_ai_run) >= 900:
+        print("⏰ 到达 15 分钟定期巡检节点，唤醒 AI 扫描市场机会！", flush=True)
+        run_trading_cycle(trigger_reason="15分钟定期巡检")
         last_ai_run = time.time()
         continue
 
-    # 2. 5秒高频盯盘：持仓出现剧烈波动时立即唤醒 AI 接管
+    # 2. 5秒高频盯盘：持仓出现剧烈波动（且相比上次唤醒变动超 2%）时立即唤醒 AI 接管
     pos_resp = trade_ctx.stock_positions()
     cost_map = {
         p.symbol: float(p.cost_price)
@@ -339,8 +384,15 @@ while (time.time() - start_time) < (RUN_MINUTES * 60):
             cost_p = cost_map[q.symbol]
             pnl_pct = ((last_p - cost_p) / cost_p) * 100
             print(f"⚡ [5秒高频盯盘] {q.symbol} 现价:{last_p:.2f} USD, 成本:{cost_p:.2f} USD, 浮盈亏:{pnl_pct:+.2f}%", flush=True)
-            if (pnl_pct >= 4.0 or pnl_pct <= -2.5) and (time.time() - last_ai_run) >= 60:
-                print(f"🚨 持仓大幅波动 ({pnl_pct:+.2f}%)，立即唤醒 AI 评估趋势！", flush=True)
-                run_trading_cycle()
+
+            prev_alert = last_alert_pnl.get(q.symbol)
+            is_extreme = (pnl_pct >= 4.0 or pnl_pct <= -2.5)
+            # 首次越过止盈止损阈值，或相比上次异动唤醒后又扩大/回撤了 2.0% 以上，且距离上次运行满 180 秒
+            need_re_alert = (prev_alert is None) or (abs(pnl_pct - prev_alert) >= 2.0)
+
+            if is_extreme and need_re_alert and (time.time() - last_ai_run) >= 180:
+                print(f"🚨 {q.symbol} 持仓大幅波动 ({pnl_pct:+.2f}%)，立即唤醒 AI 评估趋势！", flush=True)
+                last_alert_pnl[q.symbol] = pnl_pct
+                run_trading_cycle(trigger_reason=f"{q.symbol} 异动({pnl_pct:+.2f}%)紧急接管")
                 last_ai_run = time.time()
                 break
