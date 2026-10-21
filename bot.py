@@ -48,7 +48,7 @@ def get_real_usd_cash() -> tuple[float, float]:
 
 
 def get_account_status() -> str:
-    """获取真实可用资金、当前持仓（含实时浮盈）与今日订单"""
+    """获取真实可用资金、当前持仓（含实时浮盈）与今日有效订单"""
     usd_cash, usd_net = get_real_usd_cash()
     info = [
         f"【账户真实美元资产】\n"
@@ -76,12 +76,14 @@ def get_account_status() -> str:
 
     orders = trade_ctx.today_orders()
     order_list = []
-    for o in orders[:15]:
-        order_list.append(
-            f"订单号: {o.order_id}, 代码: {o.symbol}, 方向: {o.side}, "
-            f"股数: {o.quantity}, 委托价: {o.price}, 状态: {o.status}"
-        )
-    info.append("【今日订单记录】\n" + ("\n".join(order_list) if order_list else "今日暂无订单"))
+    for o in orders:
+        # 过滤掉已拒绝和已撤单的记录，确保所有未成交挂单（进行中）和已成交订单完整展示给 AI
+        if "Reject" not in str(o.status) and "Cancel" not in str(o.status):
+            order_list.append(
+                f"订单号: {o.order_id}, 代码: {o.symbol}, 方向: {o.side}, "
+                f"股数: {o.quantity}, 委托价: {o.price}, 状态: {o.status}"
+            )
+    info.append("【今日有效及未成交订单记录】\n" + ("\n".join(order_list) if order_list else "当前无未成交挂单"))
     return "\n\n".join(info)
 
 
@@ -161,7 +163,8 @@ def place_paper_limit_order(symbol: str, side: str, quantity: int, price: float,
 def cancel_pending_order(order_id: str) -> str:
     try:
         trade_ctx.cancel_order(order_id)
-        return f"撤单成功！已撤销订单号: {order_id}"
+        time.sleep(1.5)  # 等待券商后台完成持仓股数或资金解冻
+        return f"撤单请求已提交！已撤销订单号: {order_id}"
     except Exception as e:
         return f"撤单失败: {e}"
 
@@ -253,9 +256,11 @@ def run_trading_cycle():
     调用 `get_kline_trend` 可查看 `5m` 或 `15m` K线与均线趋势。
     调用 `place_paper_limit_order` 可卖出（Sell）换仓；
     调用 `place_paper_limit_order` 可买入（Buy）或加仓！
-       【💡 券商账户机制】：
+
+    【💡 券商账户底层机制背景（供你自主决策参考）】：
     1. 挂单占用机制：当你提交买入或卖出限价单后，只要该订单处于未成交的“进行中”状态（如 New / WaitToNew / PartialFilled），券商系统会自动冻结该笔订单对应的美元购买力或持仓股数（此时你在持仓里会看到 `持仓股数 > 0`，但 `可卖股数` 为 `0` 或减少）。
-    2. 委托与撤单关系：如果某只股票已经有未成交的挂单，说明你之前的指令正在排队等待市场撮合（或当前处于非交易时段暂未撮合）。在旧挂单成交或撤销前，同一批被冻结的股数/资金无法被重复提交下单，否则会被券商直接拒绝（Rejected）。
+    2. 委托与撤单关系：如果某只股票已经有未成交的挂单，说明你之前的指令正在排队等待市场撮合（或当前处于非交易时段暂未撮合）。在旧挂单成交或彻底撤销前，同一批被冻结的股数/资金无法被重复提交下单，否则会被券商直接拒绝（Rejected）。
+    3. 撤单解冻时间差：券商后台处理撤单并释放被冻结的股数/资金需要时间。如果你决定改价重挂，请先单独调用 `cancel_pending_order` 撤单，不要在同一个回合里同时并发调用 `cancel_pending_order` 和 `place_paper_limit_order`；等撤单返回后，再次调用 `get_account_status` 确认 `可卖股数` 或购买力已恢复，再提交新的买卖单。
     """
     messages = [{"role": "user", "content": strategy_prompt}]
 
