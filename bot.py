@@ -286,7 +286,7 @@ def run_trading_cycle(trigger_reason: str = "定期巡检"):
 目标：实现账户净资产最大化增长，赚最多钱。
 
 【⚠️ 极其重要：当前处于全自动无人值守后台，没有任何人类能回复你！所以直接通过工具（调用 `place_paper_limit_order` 可卖出（Sell）换仓；
-调用 `place_paper_limit_order` 可买入（Buy）或加仓！）执行你的全部决策和建议】
+调用 `place_paper_limit_order` 可买入（Buy）或加仓；调用`cancel_pending_order`可撤单）执行你的全部决策和建议】
 
 === 📊 当前账户实时状态 ===
 {account_snapshot}
@@ -303,7 +303,7 @@ def run_trading_cycle(trigger_reason: str = "定期巡检"):
  【💡 券商账户机制】：
     1. 挂单占用机制：当你提交买入或卖出限价单后，只要该订单处于未成交的“进行中”状态（如 New / WaitToNew / PartialFilled），券商系统会自动冻结该笔订单对应的美元购买力或持仓股数（此时你在持仓里会看到 `持仓股数 > 0`，但 `可卖股数` 为 `0` 或减少）。
     2. 委托与撤单关系：如果某只股票已经有未成交的挂单，说明你之前的指令正在排队等待市场撮合（或当前处于非交易时段暂未撮合）。在旧挂单成交或彻底撤销前，同一批被冻结的股数/资金无法被重复提交下单，否则会被券商直接拒绝（Rejected）。
-    3. 撤单解冻时间差：券商后台处理撤单并释放被冻结的股数/资金需要时间。如果你决定改价重挂，请先单独调用 `cancel_pending_order` 撤单，不要在同一个回合里同时并发调用 `cancel_pending_order` 和 `place_paper_limit_order`；等撤单返回后，再次调用 `get_account_status` 确认 `可卖股数` 或购买力已恢复，再提交新的买卖单。
+    3. 撤单解冻时间差：券商后台处理撤单并释放被冻结的股数/资金需要时间。如果你决定改价重挂，请先单独调用 `cancel_pending_order` 撤单，不要在同一个回合里同时并发调用 `cancel_pending_order` 和 `place_paper_limit_order`；等撤单返回后，再次确认 `可卖股数` 或购买力已恢复，再提交新的买卖单。
 """
     messages = [{"role": "user", "content": strategy_prompt}]
 
