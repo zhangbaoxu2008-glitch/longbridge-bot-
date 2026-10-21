@@ -253,6 +253,9 @@ def run_trading_cycle():
     调用 `get_kline_trend` 可查看 `5m` 或 `15m` K线与均线趋势。
     调用 `place_paper_limit_order` 可卖出（Sell）换仓；
     调用 `place_paper_limit_order` 可买入（Buy）或加仓！
+       【💡 券商账户底层机制背景（供你自主决策参考）】：
+    1. 挂单占用机制：当你提交买入或卖出限价单后，只要该订单处于未成交的“进行中”状态（如 New / WaitToNew / PartialFilled），券商系统会自动冻结该笔订单对应的美元购买力或持仓股数（此时你在持仓里会看到 `持仓股数 > 0`，但 `可卖股数` 为 `0` 或减少）。
+    2. 委托与撤单关系：如果某只股票已经有未成交的挂单，说明你之前的指令正在排队等待市场撮合（或当前处于非交易时段暂未撮合）。在旧挂单成交或撤销前，同一批被冻结的股数/资金无法被重复提交下单，否则会被券商直接拒绝（Rejected）。
     """
     messages = [{"role": "user", "content": strategy_prompt}]
 
