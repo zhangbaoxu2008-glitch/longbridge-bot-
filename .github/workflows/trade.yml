@@ -1,13 +1,35 @@
 name: Longbridge US Stock AI Bot
 
 on:
-  # 1. 允许手动点击测试运行
   workflow_dispatch:
-
-  # 2. 仅在美股常规盘中时段触发（配合单次 58 分钟运行 + 排队接力，实现盘中零断档）
   schedule:
-    # === 【当前生效：美股夏令时（香港时间 21:30 - 次日 04:00）】 ===
-    # 第一棒：UTC 13:30（香港时间 21:30）准时开盘启动，避开 21:00-21:30 盘前
     - cron: '30 13 * * 1-5'
-    # 盘中接力：UTC 14:00 - 18:30（香港时间 22:00 - 次日 02:30）每 30 分钟触发一次防漏单
-    - cron: '0,3
+    - cron: '0,30 14-18 * * 1-5'
+    - cron: '0 19 * * 1-5'
+
+jobs:
+  trade:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: trading-bot
+      cancel-in-progress: false
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装长桥与 OpenAI 依赖库
+        run: pip install -q openai longbridge
+
+      - name: 启动 AI 盯盘机器人
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          LONGBRIDGE_APP_KEY: ${{ secrets.LONGBRIDGE_APP_KEY }}
+          LONGBRIDGE_APP_SECRET: ${{ secrets.LONGBRIDGE_APP_SECRET }}
+          LONGBRIDGE_ACCESS_TOKEN: ${{ secrets.LONGBRIDGE_ACCESS_TOKEN }}
+          RUN_MINUTES: "58"
+        run: python bot.py
