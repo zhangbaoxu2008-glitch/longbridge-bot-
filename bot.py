@@ -19,7 +19,7 @@ client = OpenAI(
     api_key=OPENROUTER_API_KEY,
 )
 
-MODEL_NAME = "deepseek/deepseek-r1"
+MODEL_NAME = "deepseek/deepseek-v4.1-flash"
 RUN_MINUTES = int(os.environ.get("RUN_MINUTES", "58"))
 
 # 默认高弹性观察池（AI 随时可突破此列表查询全市场任意美股）
