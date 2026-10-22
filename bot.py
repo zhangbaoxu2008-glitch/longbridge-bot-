@@ -19,7 +19,7 @@ client = OpenAI(
     api_key=OPENROUTER_API_KEY,
 )
 
-MODEL_NAME = "deepseek/deepseek-chat"
+MODEL_NAME = "deepseek/deepseek-r1"
 RUN_MINUTES = int(os.environ.get("RUN_MINUTES", "58"))
 
 # 默认高弹性观察池（AI 随时可突破此列表查询全市场任意美股）
@@ -370,10 +370,10 @@ run_trading_cycle(trigger_reason="启动首轮建仓/巡检")
 
 while (time.time() - start_time) < (RUN_MINUTES * 60):
     time.sleep(5)
-    # 1. 每隔 15 分钟（900秒）主动唤醒一次 AI 扫描全市场新机会
-    if (time.time() - last_ai_run) >= 900:
-        print("⏰ 到达 15 分钟定期巡检节点，唤醒 AI 扫描市场机会！", flush=True)
-        run_trading_cycle(trigger_reason="15分钟定期巡检")
+    # 1. 每隔 30 分钟（1800秒）主动唤醒一次 AI 扫描全市场新机会
+    if (time.time() - last_ai_run) >= 1800:
+        print("⏰ 到达 30 分钟定期巡检节点，唤醒 AI 扫描市场机会！", flush=True)
+        run_trading_cycle(trigger_reason="30分钟定期巡检")
         last_ai_run = time.time()
         continue
 
